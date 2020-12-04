@@ -21,6 +21,8 @@ PYTHON_MAYOR_MINOR = '{0[0]}.{0[1]}'.format(version_info)
 
 WILDCARDS_REGEX = re.compile(r'^.*(\*|\?|\[!?.+]).*$')
 
+VAR_MATCHER_PATTERN = re.compile(r'.*\$\{(\w+)\}.*')
+VAR_REPLACER_PATTERN = re.compile(r'\$\{(\w+)\}')
 
 class YamlIncludeConstructor:
     """The `include constructor` for PyYAML Loaders
@@ -58,12 +60,30 @@ class YamlIncludeConstructor:
         self._base_dir = base_dir
         self._encoding = encoding
         self._reader_map = reader_map
+        self._variables = {}
 
-    def __call__(self, loader, node):
+    def var_single_replace(self, match):
+        if match.group(1) in self.variables:
+            return self.variables[match.group(1)]
+
+        if match.group(1) in os.environ:
+            return  os.environ[match.group(1)]
+
+        return match.group()
+
+    def var_multi_replacer(self, loader, node):
+        value = loader.construct_scalar(node)
+        return re.sub(VAR_REPLACER_PATTERN, self.var_single_replace, value)
+
+    def include_replacer(self, loader, node):
         args = []
         kwargs = {}
         if isinstance(node, yaml.nodes.ScalarNode):
-            args = [loader.construct_scalar(node)]
+            value = loader.construct_scalar(node)
+            if type(value) == str:
+                args = [ re.sub(VAR_REPLACER_PATTERN, self.var_single_replace, value) ]
+            else:
+                args = [ value ]
         elif isinstance(node, yaml.nodes.SequenceNode):
             args = loader.construct_sequence(node)
         elif isinstance(node, yaml.nodes.MappingNode):
@@ -83,6 +103,17 @@ class YamlIncludeConstructor:
     @base_dir.setter
     def base_dir(self, value):  # type: (str)->None
         self._base_dir = value
+
+    @property
+    def variables(self):
+        """Dictionary of variables that will be used to resolve inside the YAML file
+        :rypte: dict
+        """
+        return self._variables
+
+    @variables.setter
+    def variables(self, value: dict):
+        self._variables = value
 
     @property
     def encoding(self):  # type: ()->str
@@ -203,5 +234,12 @@ class YamlIncludeConstructor:
         if not tag.startswith('!'):
             raise ValueError('`tag` argument should start with character "!"')
         instance = cls(**kwargs)
-        yaml.add_constructor(tag, instance, loader_class)
+
+        # Add constructor for including files in YAML
+        yaml.add_constructor(tag, instance.include_replacer, loader_class)
+
+        # Add constructor for replacing variables in YAML
+        yaml.add_implicit_resolver("!varreplacer", VAR_MATCHER_PATTERN)
+        yaml.add_constructor("!varreplacer", instance.var_multi_replacer)
+
         return instance
